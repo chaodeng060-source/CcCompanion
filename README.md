@@ -6,6 +6,8 @@
 
 **Not affiliated with Anthropic.** "Claude" and "Claude Code" are trademarks of Anthropic, PBC. See [`DISCLAIMER.md`](DISCLAIMER.md).
 
+中文版: [README.zh.md](README.zh.md)
+
 ---
 
 ## What this is
