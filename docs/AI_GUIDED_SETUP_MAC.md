@@ -601,6 +601,58 @@ opia: 1 windows (created ...)
 - `tmux attach -t opia` 进去看 claude 是不是真启动了
 - 检查 server 日志 `tail -40 ~/CcCompanion/apns-server/server.err.log`
 
+### E.6 配 Claude Code Stop hook (让 chain reply 自动推回 iPhone)
+
+这一步关键。没这个 hook, cc 写完 reply 后 iPhone 不会知道 (因为 reply 在 tmux 里 没人推到 server)。
+
+repo 里有 `apns-server/claude_hooks/ccc_stop_hook.sh` 已经写好, 引导用户装上:
+
+> 跑:
+>
+> ```bash
+> mkdir -p ~/.claude/hooks
+> cp ~/CcCompanion/apns-server/claude_hooks/ccc_stop_hook.sh ~/.claude/hooks/
+> chmod +x ~/.claude/hooks/ccc_stop_hook.sh
+> ```
+
+然后编辑 `~/.claude/settings.json` (没文件就新建), 加 hook 引用:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "type": "command", "command": "~/.claude/hooks/ccc_stop_hook.sh" }
+    ]
+  }
+}
+```
+
+如果 `~/.claude/settings.json` 已经有别的内容, 把 `"hooks"` 那一段并进去, 别整体覆盖。
+
+让用户重启 cc 让 hook config 生效:
+
+> 在 tmux opia session 里按 `Ctrl+C` 退出 claude, 再起一次:
+>
+> ```bash
+> tmux send-keys -t opia "claude --dangerously-skip-permissions" Enter
+> ```
+
+verify hook 跑通:
+
+> 之后 iPhone 端 ccc 发一条消息, cc 在 mac 上回复一句。然后跑:
+>
+> ```bash
+> tail -10 /tmp/ccc_stop_hook.log
+> ```
+
+期望: 出现 `posted to /chat/append ok (chars=NNN)`。
+
+常见踩坑:
+
+- log 显示 `no transcript path` → Claude Code 版本太旧, 没把 transcript_path 传 hook。升级到最新 Claude Code 再试。
+- log 显示 `POST /chat/append failed http=401` → `CCC_AUTH_TOKEN` 没设, 默认从 `~/.ots/secret` 读, 检查这文件存在 + 内容跟 server `config.toml` 的 `shared_secret` 一致。
+- log 显示 `POST /chat/append failed http=000` 或 timeout → server 没起来, 回 Phase D verify。
+
 ---
 
 # Phase F · iPhone 端 TestFlight 装 ccc
