@@ -71,7 +71,7 @@ For the iOS side, install via TestFlight: <https://testflight.apple.com/join/PLA
               └─────────────┬────────────┘
                             │  tmux send-keys / capture-pane
               ┌─────────────▼────────────┐
-              │  tmux session "opia"     │
+              │  tmux session "cc"       │
               │  └ claude (CLI agent)    │
               └──────────────────────────┘
 ```

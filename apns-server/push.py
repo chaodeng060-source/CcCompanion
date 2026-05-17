@@ -291,7 +291,7 @@ class ServerState:
         self.allow_public_bind: bool = bool(server_cfg.get("allow_public_bind", False))
         self.allow_remote_control: bool = bool(server_cfg.get("allow_remote_control", False))
         self.allowed_ips: list[str] = list(server_cfg.get("allowed_ips", []) or [])
-        self.default_session: str = server_cfg.get("default_session", "opia")
+        self.default_session: str = server_cfg.get("default_session", "cc")
 
         if self.apns_enabled:
             self.jwt = APNsJWT(
