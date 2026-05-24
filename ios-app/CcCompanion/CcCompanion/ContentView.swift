@@ -129,6 +129,8 @@ struct ContentView: View {
             }
             // Build 215 P4 — chat badge polling 一直跑 (不绑 feature flag, 聊天 tab 永远存在)
             chatBadgeStore.start()
+            // Build 218 B1 — 启动时根据当前 tab 同步 isChatTabActive (cold start tab 0 默认)
+            chatBadgeStore.isChatTabActive = (selectedTab == 0)
         }
         .onChange(of: featureGroupView) { _, enabled in
             if enabled {
@@ -138,6 +140,8 @@ struct ContentView: View {
             }
         }
         .onChange(of: selectedTab) { _, newTab in
+            // Build 218 B1 — 在屏状态推给 ChatBadgeStore, 让其在屏期间不增 badge
+            chatBadgeStore.isChatTabActive = (newTab == 0)
             if newTab == 0 {
                 chatScrollToken &+= 1
                 // Build 215 P4 — 进 chat tab 视为已读, 清 badge
@@ -154,8 +158,11 @@ struct ContentView: View {
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
+            // Build 218 B1 — 后台时 isChatTabActive = false (即使 selectedTab==0), 防止后台 polling 误清 unread
+            chatBadgeStore.isChatTabActive = (newPhase == .active && selectedTab == 0)
             if newPhase == .active && selectedTab == 0 {
                 chatScrollToken &+= 1
+                chatBadgeStore.markAllRead()
             }
         }
     }

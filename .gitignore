@@ -77,3 +77,6 @@ _archived/
 # Workgroup user-supplied agent config (sanitization 2026-05-24)
 apns-server/agents_config.json
 
+# Build 218 S4 — user-supplied group member additions/removals (per-deployment)
+apns-server/user_overrides/
+

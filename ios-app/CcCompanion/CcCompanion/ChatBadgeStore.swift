@@ -15,6 +15,10 @@ import Combine
 final class ChatBadgeStore: ObservableObject {
     @Published var unreadCount: Int = 0
 
+    /// Build 218 B1 — ContentView set true 当 chat tab 在屏 + 应用在前台.
+    /// active 时新消息直接被算"读过", 不增 badge, 同步推 lastSeenTs.
+    @Published var isChatTabActive: Bool = false
+
     private var pollTask: Task<Void, Never>? = nil
     private var latestKnownTs: String = ""
     private let lastSeenKey = "chat_last_seen_ts"
@@ -66,9 +70,14 @@ final class ChatBadgeStore: ObservableObject {
             // 解码 — 不依赖 ChatViewModel.ChatPollResponse, 走自己最小 schema (只要 records[*].ts + role).
             let decoded = try JSONDecoder().decode(BadgePollResponse.self, from: data)
             let baseline = lastSeenTs
+            let active = isChatTabActive
+            var sawNewer = false
             for r in decoded.records where r.role != "user" && r.role != "task" {
                 if !baseline.isEmpty && r.ts > baseline {
-                    unreadCount += 1
+                    if !active {
+                        unreadCount += 1
+                    }
+                    sawNewer = true
                 } else if baseline.isEmpty {
                     // cold start 且没 baseline — 不算 unread (避免老用户首次启动看到大数字)
                     break
@@ -80,6 +89,11 @@ final class ChatBadgeStore: ObservableObject {
             // 如果 server 给的 last_ts 比本地新, 更新 latestKnownTs (不算 unread, 只追 baseline)
             if let last = decoded.lastTs, last > latestKnownTs {
                 latestKnownTs = last
+            }
+            // Build 218 B1 — chat tab 在屏时, 把新消息 baseline 推进到最新已知, 防止下次轮询又算 unread
+            if active && sawNewer {
+                lastSeenTs = latestKnownTs
+                if unreadCount != 0 { unreadCount = 0 }
             }
         } catch {
             // 静默 — badge 不是关键路径

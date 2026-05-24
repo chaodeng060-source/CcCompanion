@@ -107,6 +107,20 @@ actor GroupNetworkClient {
         return (try? JSONDecoder().decode(UploadResponse.self, from: respData))?.record
     }
 
+    /// Build 218 Q2 — 删群消息 (多选 batch 删 共用单条删).
+    @discardableResult
+    func deleteMessage(id: String) async throws -> Bool {
+        let url = CcServerConfig.serverURL.appendingPathComponent("group/delete")
+        var request = CcServerConfig.authenticatedRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 15
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["id": id])
+        let (_, response) = try await session.data(for: request)
+        try Self.validate(response: response)
+        return true
+    }
+
     func fetchPoll(since: String?, limit: Int) async throws -> GroupPollResponse {
         let url = CcServerConfig.serverURL.appendingPathComponent("group/poll")
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)

@@ -1008,6 +1008,10 @@ class PushHandler(BaseHTTPRequestHandler):
             self._handle_group_delete(body)
         elif self.path == "/group/clear":
             self._handle_group_clear(body)
+        elif self.path == "/group/members/add":
+            self._handle_group_members_add(body)
+        elif self.path == "/group/members/delete":
+            self._handle_group_members_delete(body)
         elif self.path == "/calendar/add":
             self._handle_calendar_add(body)
         elif self.path == "/calendar/update":
@@ -2282,36 +2286,16 @@ class PushHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(e)})
             return
 
-        if targets:
-            context = "\n".join(self.state.group_chat.context_lines(limit=20))
-            for agent_id in targets:
-                self.state.group_chat.set_typing(agent_id, True, dispatch_id=dispatch_id)
-            try:
-                subprocess.Popen(
-                    [
-                        "python3",
-                        self.state.bus_send_path,
-                        "--source", "ios-group",
-                        "--sender", sender_id,
-                        "--channel", "group",
-                        "--text", text,
-                        "--message-id", rec["id"],
-                        "--parent-msg-id", str(body.get("parent_msg_id") or ""),
-                        "--mentions", ",".join(mentions),
-                        "--to", ",".join(targets),
-                        "--context", context,
-                        "--hop-count", str(hop_count + 1),
-                        "--inject-only",
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception as e:
-                logger.warning("group bus_send fail: %s", e)
-                delivery["failed"] = targets
-                delivery["targets"] = targets
-                for agent_id in targets:
-                    self.state.group_chat.set_typing(agent_id, False, dispatch_id=dispatch_id)
+        self._group_fan_out(
+            sender_id=sender_id,
+            text=text,
+            rec=rec,
+            mentions=mentions,
+            targets=targets,
+            parent_msg_id=body.get("parent_msg_id"),
+            hop_count=hop_count,
+            dispatch_id=dispatch_id,
+        )
 
         self._send_json(200, {"ok": True, "record": rec, "targets": targets})
 
@@ -2388,14 +2372,19 @@ class PushHandler(BaseHTTPRequestHandler):
         targets: list[str],
         parent_msg_id: Any = None,
         hop_count: int = 0,
-    ) -> None:
-        """Build 217-patch-A-revision P1 — 共享的群消息 fan-out 注入逻辑.
-        被 /group/send + /group/upload (后续 /group/append 如果开放上传也要走) 共用.
-        把 record 注入给 targets 的 tmux session, 让 agent 收到消息触发回复 chain.
+        dispatch_id: str | None = None,
+    ) -> str:
+        """共享的群消息 fan-out 注入逻辑 (build 217-patch-A-revision P1 + B-combined A-R2).
+        被 /group/send + /group/upload 共用. Popen 起 bus_send 注入 tmux session.
+        返回 dispatch_id; 当 caller 提前生成并传入时直接复用, 否则内部生成.
+        Popen 成功 → rec.delivery.delivered = list(targets); 异常 → failed = list(targets).
         """
+        if dispatch_id is None:
+            dispatch_id = f"dsp_{int(time.time() * 1000)}"
+        delivery = rec.setdefault("delivery", {})
+        delivery.setdefault("dispatch_id", dispatch_id)
         if not targets:
-            return
-        dispatch_id = f"dsp_{int(time.time() * 1000)}"
+            return dispatch_id
         context = "\n".join(self.state.group_chat.context_lines(limit=20))
         for agent_id in targets:
             self.state.group_chat.set_typing(agent_id, True, dispatch_id=dispatch_id)
@@ -2419,10 +2408,13 @@ class PushHandler(BaseHTTPRequestHandler):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            delivery["delivered"] = list(targets)
         except Exception as e:
             logger.warning("group fan-out fail: %s", e)
+            delivery["failed"] = list(targets)
             for agent_id in targets:
                 self.state.group_chat.set_typing(agent_id, False, dispatch_id=dispatch_id)
+        return dispatch_id
 
     def _infer_group_task_owner(self, body: dict[str, Any], mentions: list[str]) -> str | None:
         assignee = body.get("assignee") or body.get("assigned_to")
@@ -2457,6 +2449,58 @@ class PushHandler(BaseHTTPRequestHandler):
                 jsonl.write_text("")
                 self.state.group_chat._last_ts = ""
             self._send_json(200, {"ok": True, "cleared": True, "backup": str(bak) if jsonl.exists() else None})
+        except Exception as e:
+            self._send_json(500, {"ok": False, "error": str(e)})
+
+    # ---------- Build 218 S4 — user member add/delete (gitignored overrides) ----------
+
+    def _members_override_file(self, kind: str) -> Path:
+        """kind: 'additions' or 'removals'. Stored alongside apns-server data dir."""
+        base = Path(self.state.bus_send_path).parent if False else (Path(__file__).resolve().parent / "user_overrides")
+        base.mkdir(parents=True, exist_ok=True)
+        return base / f"group_member_{kind}.json"
+
+    def _handle_group_members_add(self, body: dict[str, Any]):
+        member_id = str(body.get("id") or "").strip()
+        if not member_id:
+            self._send_json(400, {"error": "id required"})
+            return
+        record = {
+            "id": member_id,
+            "display_name": str(body.get("display_name") or member_id),
+            "avatar": str(body.get("avatar") or ""),
+            "color": str(body.get("color") or "slate"),
+            "model": str(body.get("model") or ""),
+            "tmux": str(body.get("tmux") or ""),
+            "can_reply": bool(body.get("can_reply", True)),
+            "kind": "agent",
+        }
+        path = self._members_override_file("additions")
+        try:
+            existing: list[dict[str, Any]] = []
+            if path.exists():
+                existing = json.loads(path.read_text(encoding="utf-8") or "[]")
+            existing = [r for r in existing if r.get("id") != member_id]
+            existing.append(record)
+            path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._send_json(200, {"ok": True, "member": record})
+        except Exception as e:
+            self._send_json(500, {"ok": False, "error": str(e)})
+
+    def _handle_group_members_delete(self, body: dict[str, Any]):
+        member_id = str(body.get("id") or "").strip()
+        if not member_id:
+            self._send_json(400, {"error": "id required"})
+            return
+        path = self._members_override_file("removals")
+        try:
+            existing: list[str] = []
+            if path.exists():
+                existing = json.loads(path.read_text(encoding="utf-8") or "[]")
+            if member_id not in existing:
+                existing.append(member_id)
+            path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._send_json(200, {"ok": True, "removed": member_id})
         except Exception as e:
             self._send_json(500, {"ok": False, "error": str(e)})
 
@@ -3829,6 +3873,7 @@ class PushHandler(BaseHTTPRequestHandler):
             hop_count=0,
         )
 
+        dispatch_id = f"dsp_{int(time.time() * 1000)}"
         try:
             rec = self.state.group_chat.append(
                 sender_id,
@@ -3837,7 +3882,13 @@ class PushHandler(BaseHTTPRequestHandler):
                 mentions=normalized_mentions,
                 reply_to=reply_to,
                 parent_msg_id=reply_to,
-                delivery={"targets": targets, "delivered": [], "failed": [], "mode": "upload"},
+                delivery={
+                    "targets": targets,
+                    "delivered": [],
+                    "failed": [],
+                    "mode": "upload",
+                    "dispatch_id": dispatch_id,
+                },
                 attachment_url=attachment_url,
                 attachment_filename=filename,
                 attachment_type=atype,
@@ -3846,8 +3897,6 @@ class PushHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(e)})
             return
 
-        # Build 217-patch-A-revision P1 — fan-out 给 @ 到的 agents.
-        # 注入文本里加 attachment 提示, 让 agent 知道有附件可读 (Read 工具读 stored_path).
         type_label = {"image": "图片", "video": "视频", "audio": "音频", "file": "文件"}.get(atype, "附件")
         fan_out_text = f"[用户上传{type_label}: {filename}] {text}".strip()
         fan_out_text += f"\n本地路径: {stored_path}"
@@ -3860,6 +3909,7 @@ class PushHandler(BaseHTTPRequestHandler):
             targets=targets,
             parent_msg_id=reply_to,
             hop_count=0,
+            dispatch_id=dispatch_id,
         )
 
         self._send_json(200, {"ok": True, "record": rec, "targets": targets})

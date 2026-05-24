@@ -166,8 +166,11 @@ nonisolated struct GroupMember: Identifiable, Codable, Hashable, Sendable {
     }
 
     var title: String {
-        // Sanitized: was a project-specific nickname mapping. Fork users may add
-        // their own display-name overrides via agents_config.json (server side).
+        // Build 218 S3 — 用户在 Settings 群聊 row 编辑过的 displayName override 优先.
+        // 未设 override 则回退到 server roster / agents_config.json 给的 displayName.
+        if let override = GroupMemberOverrideStore.displayNameOverride(for: id), !override.isEmpty {
+            return override
+        }
         return displayName
     }
 
@@ -340,5 +343,122 @@ struct GroupAvatarView: View {
         .frame(width: size, height: size)
         .clipShape(Circle())
         .id("\(member.id)-\(avatarRevision)-\(AvatarDiskStore.filename(fromStoredValue: avatarPath ?? ""))")
+    }
+}
+
+// MARK: - Build 218 S3/S4 — 用户对群成员名单的本地覆盖 / 增 / 删
+
+/// 用户在 Settings 编辑过的 member displayName 覆盖. JSON map<id, override-name> 落 UserDefaults.
+enum GroupMemberOverrideStore {
+    static let storageKey = "group_member_overrides"
+    static let revisionKey = "group_member_overrides_revision"
+
+    static func overrides() -> [String: String] {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([String: String].self, from: data) else {
+            return [:]
+        }
+        return decoded
+    }
+
+    static func displayNameOverride(for memberId: String) -> String? {
+        overrides()[memberId]
+    }
+
+    static func setDisplayNameOverride(_ name: String?, for memberId: String) {
+        var map = overrides()
+        if let name, !name.isEmpty {
+            map[memberId] = name
+        } else {
+            map.removeValue(forKey: memberId)
+        }
+        guard let data = try? JSONEncoder().encode(map) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+        bumpRevision()
+    }
+
+    private static func bumpRevision() {
+        let next = UserDefaults.standard.integer(forKey: revisionKey) + 1
+        UserDefaults.standard.set(next, forKey: revisionKey)
+        NotificationCenter.default.post(name: .ccGroupAppearanceDidChange, object: nil)
+    }
+}
+
+/// 用户自加的 agent 成员 — JSON Array 落 UserDefaults; 跟 default roster 叠加.
+enum GroupMemberAdditionsStore {
+    static let storageKey = "group_member_additions"
+    static let revisionKey = "group_member_additions_revision"
+
+    static func additions() -> [GroupMember] {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([GroupMember].self, from: data) else {
+            return []
+        }
+        return decoded
+    }
+
+    static func add(_ member: GroupMember) {
+        var list = additions().filter { $0.id != member.id }
+        list.append(member)
+        persist(list)
+    }
+
+    static func remove(id: String) {
+        let list = additions().filter { $0.id != id }
+        persist(list)
+    }
+
+    private static func persist(_ list: [GroupMember]) {
+        guard let data = try? JSONEncoder().encode(list) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+        bumpRevision()
+    }
+
+    private static func bumpRevision() {
+        let next = UserDefaults.standard.integer(forKey: revisionKey) + 1
+        UserDefaults.standard.set(next, forKey: revisionKey)
+        NotificationCenter.default.post(name: .ccGroupAppearanceDidChange, object: nil)
+    }
+}
+
+/// 用户删除过的 member id 集合 — 显示时从 default roster 中过滤掉.
+enum GroupMemberRemovalsStore {
+    static let storageKey = "group_member_removals"
+    static let revisionKey = "group_member_removals_revision"
+
+    static func removals() -> Set<String> {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+            return []
+        }
+        return Set(decoded)
+    }
+
+    static func isRemoved(_ id: String) -> Bool {
+        removals().contains(id)
+    }
+
+    static func markRemoved(_ id: String) {
+        var set = removals()
+        set.insert(id)
+        persist(set)
+    }
+
+    static func unmarkRemoved(_ id: String) {
+        var set = removals()
+        set.remove(id)
+        persist(set)
+    }
+
+    private static func persist(_ set: Set<String>) {
+        guard let data = try? JSONEncoder().encode(Array(set)) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+        bumpRevision()
+    }
+
+    private static func bumpRevision() {
+        let next = UserDefaults.standard.integer(forKey: revisionKey) + 1
+        UserDefaults.standard.set(next, forKey: revisionKey)
+        NotificationCenter.default.post(name: .ccGroupAppearanceDidChange, object: nil)
     }
 }

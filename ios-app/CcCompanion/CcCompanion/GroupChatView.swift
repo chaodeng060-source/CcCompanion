@@ -40,6 +40,11 @@ struct GroupChatView: View {
     @State private var showCameraPicker: Bool = false
     @State private var showFileImporter: Bool = false
 
+    // Build 218 Q2 — 多选状态. 进多选 → 顶部 toolbar 显已选 N + 批量删 / 收藏 / 分享 / 取消.
+    @State private var multiSelectMode: Bool = false
+    @State private var selectedTs: Set<String> = []
+    @State private var multiDeleteConfirm: Bool = false
+
     private var chatBodySize: CGFloat {
         chatFontLevel == "small" ? 15 : chatFontLevel == "large" ? 18 : 17
     }
@@ -66,6 +71,11 @@ struct GroupChatView: View {
     var body: some View {
         VStack(spacing: 0) {
             customHeader
+
+            // Build 218 Q2 — 多选 toolbar (顶部 sticky bar 显示已选 N 条 + 批量操作)
+            if multiSelectMode {
+                multiSelectToolbar
+            }
 
             GroupChatStatusStrip(store: store)
             // Build 215 P3 — 搜索栏 + filter chip (copy ChatView 模式 ChatView.swift:2704-2743)
@@ -128,11 +138,26 @@ struct GroupChatView: View {
                                     bodySize: chatBodySize,
                                     isFavorite: favoriteMessageIds.contains(message.id),
                                     parentPreview: parent.map { ($0.text, store.member(for: $0.senderId).displayName) },
+                                    multiSelectMode: multiSelectMode,
+                                    isSelected: selectedTs.contains(message.ts),
                                     onToggleFavorite: {
                                         toggleFavorite(message: message, member: member)
                                     },
                                     onQuote: { quoteMessage(message, member: member) },
-                                    onDelete: { /* T4 stub — server 端删消息单独 spec */ }
+                                    onDelete: {
+                                        Task { try? await GroupNetworkClient.shared.deleteMessage(id: message.id); await store.refreshNow() }
+                                    },
+                                    onEnterMultiSelect: {
+                                        multiSelectMode = true
+                                        selectedTs.insert(message.ts)
+                                    },
+                                    onToggleSelect: {
+                                        if selectedTs.contains(message.ts) {
+                                            selectedTs.remove(message.ts)
+                                        } else {
+                                            selectedTs.insert(message.ts)
+                                        }
+                                    }
                                 )
                                     .id(message.id)
                             }
@@ -505,6 +530,104 @@ struct GroupChatView: View {
         }
         return hits
     }
+
+    // MARK: - Build 218 Q2 — 多选 toolbar + batch helpers
+
+    @ViewBuilder
+    private var multiSelectToolbar: some View {
+        HStack(spacing: 12) {
+            Button {
+                exitMultiSelect()
+            } label: {
+                Text("取消")
+                    .font(.ccSerifAdaptive(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.ccAccent)
+            }
+            .buttonStyle(.plain)
+
+            Text("已选 \(selectedTs.count) 条")
+                .font(.ccSerifAdaptive(size: 13))
+                .foregroundStyle(Color.ccText)
+
+            Spacer()
+
+            // 收藏 (批量)
+            Button {
+                batchFavorite()
+            } label: {
+                Image(systemName: "star")
+                    .font(.system(size: 16))
+                    .foregroundStyle(Color.ccAccent)
+            }
+            .buttonStyle(.plain)
+            .disabled(selectedTs.isEmpty)
+
+            // 分享 (聚合文本)
+            ShareLink(item: batchShareText()) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 16))
+                    .foregroundStyle(Color.ccAccent)
+            }
+            .disabled(selectedTs.isEmpty)
+
+            // 删除
+            Button(role: .destructive) {
+                multiDeleteConfirm = true
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.red)
+            }
+            .buttonStyle(.plain)
+            .disabled(selectedTs.isEmpty)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.ccCard)
+        .overlay(Rectangle().fill(Color.ccTextDim.opacity(0.15)).frame(height: 0.5), alignment: .bottom)
+        .alert("删除已选 \(selectedTs.count) 条", isPresented: $multiDeleteConfirm) {
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) { batchDelete() }
+        } message: {
+            Text("确定从群里删除已选的 \(selectedTs.count) 条消息吗?")
+        }
+    }
+
+    private func exitMultiSelect() {
+        multiSelectMode = false
+        selectedTs.removeAll()
+    }
+
+    private func selectedMessages() -> [GroupMessage] {
+        store.messages.filter { selectedTs.contains($0.ts) }
+    }
+
+    private func batchShareText() -> String {
+        selectedMessages()
+            .map { "[\($0.shortTime)] \(store.member(for: $0.senderId).displayName): \($0.text)" }
+            .joined(separator: "\n")
+    }
+
+    private func batchFavorite() {
+        for m in selectedMessages() {
+            let member = store.member(for: m.senderId)
+            if !favoriteMessageIds.contains(m.id) {
+                toggleFavorite(message: m, member: member)
+            }
+        }
+        exitMultiSelect()
+    }
+
+    private func batchDelete() {
+        let ids = selectedMessages().map(\.id)
+        Task {
+            for id in ids {
+                try? await GroupNetworkClient.shared.deleteMessage(id: id)
+            }
+            await store.refreshNow()
+        }
+        exitMultiSelect()
+    }
 }
 
 // MARK: - Status Strip
@@ -575,9 +698,14 @@ private struct GroupMessageRow: View {
     let isFavorite: Bool
     // Build 217 Q1 — parent message preview (text + sender displayName) 用来 render 引用回复 badge
     let parentPreview: (text: String, senderName: String)?
+    // Build 218 Q2 — 多选 mode params (默认 off, 父 view 切 on 时切换为 tap-to-select)
+    var multiSelectMode: Bool = false
+    var isSelected: Bool = false
     let onToggleFavorite: () -> Void
     let onQuote: () -> Void
     let onDelete: () -> Void
+    var onEnterMultiSelect: (() -> Void)? = nil
+    var onToggleSelect: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -621,7 +749,7 @@ private struct GroupMessageRow: View {
                         }
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(Color.ccCard.opacity(0.5))
+                        .background(Color.ccCard)
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
 
@@ -658,7 +786,7 @@ private struct GroupMessageRow: View {
 
             if !message.isHumanSender { Spacer(minLength: 46) }
         }
-        // Build 215 T4 — contextMenu copy chat 子集 (复制 / 引用 / 收藏 / 分享 / 删除)
+        // Build 215 T4 — contextMenu copy chat 子集 (复制 / 引用 / 多选 / 收藏 / 分享 / 删除)
         .contextMenu {
             Button {
                 #if canImport(UIKit)
@@ -670,6 +798,12 @@ private struct GroupMessageRow: View {
             Button(action: onQuote) {
                 Label("引用回复", systemImage: "quote.bubble")
             }
+            // Build 218 Q2 — 多选入口
+            Button {
+                onEnterMultiSelect?()
+            } label: {
+                Label("多选", systemImage: "checklist")
+            }
             Button(action: onToggleFavorite) {
                 Label(isFavorite ? "取消收藏" : "收藏", systemImage: isFavorite ? "star.slash" : "star")
             }
@@ -679,6 +813,23 @@ private struct GroupMessageRow: View {
             Button(role: .destructive, action: onDelete) {
                 Label("删除", systemImage: "trash")
             }
+        }
+        // Build 218 Q2 — 多选 mode 下 tap bubble 切换 selection (绕过 contextMenu hit-test).
+        .overlay(alignment: .topLeading) {
+            if multiSelectMode {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(isSelected ? Color.ccAccent : Color.ccTextDim)
+                    .padding(.leading, 4)
+                    .padding(.top, 22)
+            }
+        }
+        .background(
+            // 多选时整行可点
+            Color.clear.contentShape(Rectangle())
+        )
+        .onTapGesture {
+            if multiSelectMode { onToggleSelect?() }
         }
     }
 
@@ -751,12 +902,28 @@ private struct GroupMessageRow: View {
         }
     }
 
-    // Build 217 T6 — bubble 用 solid color 不再带 opacity, 跟 ChatView 视觉一致 (不让背景图透过 bubble 看不清字)
+    // Build 218 B2 — bubble 全部 solid (alpha=1), 跟 ChatView 视觉一致.
+    // task/block/ship 用预扁平化的 light/dark 双色保留语义提示, 不靠 opacity 叠加.
     private var bubbleColor: Color {
-        if message.isHumanSender { return Color.ccAccent.opacity(0.22) }
-        if message.isBlock { return Color.red.opacity(0.16) }
-        if message.isTask { return Color.blue.opacity(0.14) }
-        if message.isShip { return Color.green.opacity(0.16) }
+        if message.isHumanSender { return Color.ccUser }
+        if message.isBlock {
+            return Color(
+                light: Color(red: 0.96, green: 0.85, blue: 0.84),
+                dark:  Color(red: 0.30, green: 0.13, blue: 0.11)
+            )
+        }
+        if message.isTask {
+            return Color(
+                light: Color(red: 0.86, green: 0.90, blue: 0.96),
+                dark:  Color(red: 0.13, green: 0.18, blue: 0.32)
+            )
+        }
+        if message.isShip {
+            return Color(
+                light: Color(red: 0.86, green: 0.95, blue: 0.87),
+                dark:  Color(red: 0.11, green: 0.25, blue: 0.15)
+            )
+        }
         return Color.ccCard
     }
 

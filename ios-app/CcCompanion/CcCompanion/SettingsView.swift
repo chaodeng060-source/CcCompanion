@@ -382,6 +382,14 @@ struct CcSettingsView: View {
     @State private var groupAvatarCropPresented: Bool = false
     @State private var groupAvatarRefreshTick: Int = 0
 
+    // Build 218 S3/S4 — member 编辑 / 添加 / 删除 sheet 状态
+    @State private var memberEditTarget: GroupMember? = nil
+    @State private var memberAddSheetPresented: Bool = false
+    @State private var memberDeleteConfirm: GroupMember? = nil
+    @AppStorage(GroupMemberOverrideStore.revisionKey) private var memberOverrideRev: Int = 0
+    @AppStorage(GroupMemberAdditionsStore.revisionKey) private var memberAdditionsRev: Int = 0
+    @AppStorage(GroupMemberRemovalsStore.revisionKey) private var memberRemovalsRev: Int = 0
+
     // Phase E (item 7) — chat background PHPicker state
     @State private var bgPickerPresented: Bool = false
     @State private var bgPickedImage: UIImage? = nil
@@ -395,9 +403,19 @@ struct CcSettingsView: View {
     private static let groupAvatarFilename = "cccGroupAvatar.png"
 
     private var groupConfigMembers: [GroupMember] {
-        ["amian", "opia", "di", "shu", "sonnet", "opus47_fresh", "fresh"].compactMap { id in
-            GroupMember.defaultMap[id]?.withCustomAvatarURL(GroupAvatarStore.avatarPath(for: id))
+        // Build 218 S4 — base = default roster − removals, 然后追加 user additions.
+        // 同 revision key 触发 SwiftUI 重算 (memberAdditionsRev / memberRemovalsRev / memberOverrideRev).
+        _ = memberOverrideRev; _ = memberAdditionsRev; _ = memberRemovalsRev
+        let removals = GroupMemberRemovalsStore.removals()
+        let baseIDs = ["amian", "opia", "di", "shu", "sonnet", "opus47_fresh", "fresh"]
+        var list: [GroupMember] = baseIDs.compactMap { id in
+            guard !removals.contains(id) else { return nil }
+            return GroupMember.defaultMap[id]?.withCustomAvatarURL(GroupAvatarStore.avatarPath(for: id))
         }
+        for added in GroupMemberAdditionsStore.additions() where !removals.contains(added.id) {
+            list.append(added.withCustomAvatarURL(GroupAvatarStore.avatarPath(for: added.id)))
+        }
+        return list
     }
 
     private var buildVersion: String {
@@ -722,11 +740,88 @@ struct CcSettingsView: View {
 
             ForEach(groupConfigMembers) { member in
                 groupAvatarRow(member: member)
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            memberDeleteConfirm = member
+                        } label: {
+                            Label("删除成员", systemImage: "trash")
+                        }
+                    }
             }
+
+            // Build 218 S4 — 列表底加 "+" 添加成员入口
+            Button {
+                memberAddSheetPresented = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(Color.ccAccent)
+                    Text("添加成员")
+                        .font(.ccSerifAdaptive(size: 14))
+                        .foregroundStyle(Color.ccAccent)
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .overlay(Rectangle().fill(Color.ccTextDim.opacity(0.1)).frame(height: 0.5), alignment: .bottom)
 
             toggleRow("群聊视图", binding: $featureGroupView)
         }
-        .id("group-config-\(groupAvatarRefreshTick)-\(groupBgRefreshTick)")
+        .id("group-config-\(groupAvatarRefreshTick)-\(groupBgRefreshTick)-\(memberOverrideRev)-\(memberAdditionsRev)-\(memberRemovalsRev)")
+        .sheet(item: $memberEditTarget) { member in
+            GroupMemberEditSheet(member: member) { newName, clearAvatar in
+                let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty || trimmed == member.displayName {
+                    GroupMemberOverrideStore.setDisplayNameOverride(nil, for: member.id)
+                } else {
+                    GroupMemberOverrideStore.setDisplayNameOverride(trimmed, for: member.id)
+                }
+                if clearAvatar {
+                    GroupAvatarStore.removeAvatar(for: member.id)
+                }
+                memberEditTarget = nil
+                actionToast = "\(trimmed.isEmpty ? member.displayName : trimmed) 已保存"
+            } onPickAvatar: {
+                groupAvatarMemberId = member.id
+                memberEditTarget = nil
+                groupAvatarPickerPresented = true
+            } onCancel: {
+                memberEditTarget = nil
+            }
+        }
+        .sheet(isPresented: $memberAddSheetPresented) {
+            GroupMemberAddSheet { newMember in
+                GroupMemberAdditionsStore.add(newMember)
+                Task { await GroupMemberSyncClient.add(newMember) }
+                memberAddSheetPresented = false
+                actionToast = "已添加 \(newMember.displayName)"
+            } onCancel: {
+                memberAddSheetPresented = false
+            }
+        }
+        .alert("删除成员", isPresented: Binding(
+            get: { memberDeleteConfirm != nil },
+            set: { if !$0 { memberDeleteConfirm = nil } }
+        )) {
+            Button("取消", role: .cancel) { memberDeleteConfirm = nil }
+            Button("删除", role: .destructive) {
+                if let m = memberDeleteConfirm {
+                    GroupMemberRemovalsStore.markRemoved(m.id)
+                    GroupMemberAdditionsStore.remove(id: m.id)
+                    Task { await GroupMemberSyncClient.delete(id: m.id) }
+                    actionToast = "已从群里删除 \(m.title)"
+                }
+                memberDeleteConfirm = nil
+            }
+        } message: {
+            if let m = memberDeleteConfirm {
+                Text("确定从群里删除 \(m.title) 吗?")
+            }
+        }
     }
 
     // Build 215 S2 — 群聊主 row (头像 + 名称 + 编辑入口)
@@ -861,22 +956,15 @@ struct CcSettingsView: View {
 
             Spacer()
 
-            Text(GroupAvatarStore.avatarPath(for: member.id) == nil ? "选择" : "更换")
-                .font(.ccSerifAdaptive(size: 12))
-                .foregroundStyle(Color.ccAccent)
-
-            if GroupAvatarStore.avatarPath(for: member.id) != nil {
-                Button {
-                    GroupAvatarStore.removeAvatar(for: member.id)
-                    groupAvatarRefreshTick &+= 1
-                    actionToast = "\(member.title) 头像已恢复默认"
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.ccSerifAdaptive(size: 12, weight: .semibold))
-                        .foregroundStyle(.red)
-                }
-                .buttonStyle(.plain)
+            // Build 218 S3 — 替代旧"选择/更换 + trash" 为单一"编辑"按钮 → 弹 GroupMemberEditSheet
+            Button {
+                memberEditTarget = member
+            } label: {
+                Text("编辑")
+                    .font(.ccSerifAdaptive(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.ccAccent)
             }
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -1528,5 +1616,195 @@ struct GroupSettingsEditSheet: View {
                     .foregroundStyle(Color.ccAccent)
             }
         }
+    }
+}
+
+// MARK: - Build 218 S3 — GroupMemberEditSheet (单个 member 头像 + displayName 编辑)
+struct GroupMemberEditSheet: View {
+    let member: GroupMember
+    let onSave: (String, Bool) -> Void  // (newName, clearAvatar)
+    let onPickAvatar: () -> Void
+    let onCancel: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var draftName: String = ""
+    @State private var draftClearAvatar: Bool = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("头像") {
+                    HStack(spacing: 14) {
+                        GroupAvatarView(member: member, size: 64)
+                            .overlay(Circle().stroke(Color.ccAccent.opacity(0.3), lineWidth: 1))
+                        VStack(alignment: .leading, spacing: 6) {
+                            Button {
+                                // 关 sheet, parent 拉起 PHPicker (复用现有 groupAvatarPickerPresented 流).
+                                onPickAvatar()
+                            } label: {
+                                Label(GroupAvatarStore.avatarPath(for: member.id) == nil ? "选择头像" : "更换头像", systemImage: "photo.on.rectangle")
+                            }
+                            if GroupAvatarStore.avatarPath(for: member.id) != nil {
+                                Button(role: .destructive) {
+                                    draftClearAvatar = true
+                                } label: {
+                                    Label(draftClearAvatar ? "保存时清除" : "恢复默认", systemImage: "arrow.uturn.backward")
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                Section("名称") {
+                    TextField(member.displayName, text: $draftName)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                    if let override = GroupMemberOverrideStore.displayNameOverride(for: member.id), !override.isEmpty {
+                        Button(role: .destructive) {
+                            draftName = member.displayName
+                        } label: {
+                            Label("恢复默认名称 (\(member.displayName))", systemImage: "arrow.uturn.backward")
+                        }
+                    }
+                }
+                Section("信息") {
+                    HStack { Text("ID").foregroundStyle(Color.ccTextDim); Spacer(); Text(member.id).font(.system(.body, design: .monospaced)) }
+                    if let model = member.model, !model.isEmpty {
+                        HStack { Text("模型").foregroundStyle(Color.ccTextDim); Spacer(); Text(model) }
+                    }
+                    if let tmux = member.tmux, !tmux.isEmpty {
+                        HStack { Text("tmux session").foregroundStyle(Color.ccTextDim); Spacer(); Text(tmux).font(.system(.body, design: .monospaced)) }
+                    }
+                }
+            }
+            .navigationTitle("编辑 \(member.title)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { onCancel() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        if draftClearAvatar {
+                            GroupAvatarStore.removeAvatar(for: member.id)
+                        }
+                        onSave(draftName, draftClearAvatar)
+                    }
+                }
+            }
+        }
+        .onAppear {
+            draftName = GroupMemberOverrideStore.displayNameOverride(for: member.id) ?? member.displayName
+        }
+    }
+}
+
+// MARK: - Build 218 S4 — GroupMemberAddSheet (添加新 agent 成员)
+struct GroupMemberAddSheet: View {
+    let onSave: (GroupMember) -> Void
+    let onCancel: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var draftId: String = ""
+    @State private var draftName: String = ""
+    @State private var draftModel: String = ""
+    @State private var draftTmux: String = ""
+    @State private var draftCanReply: Bool = true
+    @State private var draftColor: String = "slate"
+    @State private var draftAvatar: String = ""
+
+    private let colorOptions = ["orange", "blue", "green", "purple", "slate", "neutral"]
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("身份") {
+                    TextField("id (英文唯一标识, 如 my-agent)", text: $draftId)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                    TextField("显示名称", text: $draftName)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                    TextField("头像首字 (可选, 1 字)", text: $draftAvatar)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                }
+                Section("接入") {
+                    TextField("模型 (e.g. Claude Sonnet 4.6)", text: $draftModel)
+                    TextField("tmux session 名", text: $draftTmux)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                    Toggle("可回复 (canReply)", isOn: $draftCanReply)
+                }
+                Section("颜色") {
+                    Picker("颜色", selection: $draftColor) {
+                        ForEach(colorOptions, id: \.self) { Text($0).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                }
+            }
+            .navigationTitle("添加成员")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { onCancel() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        let id = draftId.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let name = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let avatar = draftAvatar.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let m = GroupMember(
+                            id: id,
+                            displayName: name.isEmpty ? id : name,
+                            kind: "agent",
+                            avatar: avatar.isEmpty ? String((name.isEmpty ? id : name).prefix(1)).uppercased() : avatar,
+                            color: draftColor,
+                            model: draftModel.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+                            tmux: draftTmux.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+                            canReply: draftCanReply,
+                            optional: nil,
+                            customAvatarURL: nil
+                        )
+                        onSave(m)
+                    }
+                    .disabled(draftId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
+}
+
+// MARK: - Build 218 S4 — backend sync client (best-effort, AppStorage 是 source of truth)
+enum GroupMemberSyncClient {
+    static func add(_ member: GroupMember) async {
+        let url = CcServerConfig.serverURL.appendingPathComponent("group/members/add")
+        var req = CcServerConfig.authenticatedRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let payload: [String: Any] = [
+            "id": member.id,
+            "display_name": member.displayName,
+            "avatar": member.avatar ?? "",
+            "color": member.color ?? "slate",
+            "model": member.model ?? "",
+            "tmux": member.tmux ?? "",
+            "can_reply": member.canReply ?? true,
+        ]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+        _ = try? await URLSession.shared.data(for: req)
+    }
+
+    static func delete(id: String) async {
+        let url = CcServerConfig.serverURL.appendingPathComponent("group/members/delete")
+        var req = CcServerConfig.authenticatedRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["id": id])
+        _ = try? await URLSession.shared.data(for: req)
     }
 }
