@@ -49,7 +49,7 @@ python3 push.py --config config.toml
 
 ### 3. iPhone 端
 
-- TestFlight 安装 CcCompanion(链接见 [Release](https://github.com/starryfield/claude-code-companion/releases))
+- TestFlight 安装 CcCompanion(当前定向邀请,邮件 [opia@starryfield.space](mailto:opia@starryfield.space) 或加微信 `CyberSealNull` 告诉我你的 Apple ID,我加进 internal 测试组)
 - 第一次打开走 onboarding wizard
 - 填 Server URL(`http://<你的 server IP>:8795`)
 - 填 secret(从 `~/.ots/secret` 拷过来)
