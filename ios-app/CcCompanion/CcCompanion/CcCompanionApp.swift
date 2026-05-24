@@ -30,8 +30,11 @@ struct CcCompanionApp: App {
                 ag.set(0,                          forKey: "serverActiveIndex")
                 ag.set("http://127.0.0.1:8796",    forKey: "serverURL")
             }
-            // Shared secret usually lives in Keychain; set it via the official setter.
-            CcServerConfig.setSharedSecret("597e2950d16f493c9444a152ecc564a3")
+            // Shared secret read from launchEnvironment (UITest injects via XCUIApplication.launchEnvironment).
+            // Never hardcode a secret literal here — public repo leaks it (incident 2026-05-24).
+            if let injected = ProcessInfo.processInfo.environment["CCC_UITEST_SHARED_SECRET"], !injected.isEmpty {
+                CcServerConfig.setSharedSecret(injected)
+            }
         }
         // Phase multi-server fallback (2026-05-11) — 旧版单 serverURL 一次性迁到新 endpoints 列表.
         CcServerConfig.migrateLegacySharedSecretIfNeeded()
