@@ -595,6 +595,9 @@ class PushHandler(BaseHTTPRequestHandler):
         if self.path == "/group/roster":
             self._handle_group_roster()
             return
+        if self.path.startswith("/group/roster/online"):
+            self._handle_group_roster_online()
+            return
         if self.path == "/group/status":
             self._handle_group_status()
             return
@@ -2195,6 +2198,10 @@ class PushHandler(BaseHTTPRequestHandler):
         except Exception:
             limit = 100
         limit = min(max(limit, 1), 500)
+        # Build 220 item 13: optional viewer heartbeat for online roster.
+        viewer = self._query_value(qs, "viewer") or self._query_value(qs, "sender_id")
+        if viewer:
+            self.state.group_chat.touch_active(viewer)
         records = self.state.group_chat.read_since(since_ts=since, limit=limit)
         self._send_json(
             200,
@@ -2206,6 +2213,16 @@ class PushHandler(BaseHTTPRequestHandler):
                 "status": self.state.group_chat.status_snapshot(self._group_tmux_session_exists),
             },
         )
+
+    def _handle_group_roster_online(self):
+        """Build 220 item 13 — 在线人数 endpoint.
+        在线 = 最近 60s 有 group_send / group_upload / group_append (append 自动更新)
+        或显式 poll heartbeat (sender_id query). agent 端 tmux session exists 也算.
+        """
+        active_senders = self.state.group_chat.recently_active_senders(window_seconds=60)
+        tmux_online = self._group_online_agents()
+        merged = sorted(set(active_senders) | set(tmux_online))
+        self._send_json(200, {"ok": True, "count": len(merged), "online": merged})
 
     def _handle_group_send(self, body: dict[str, Any]):
         text = str(body.get("text") or "").strip()

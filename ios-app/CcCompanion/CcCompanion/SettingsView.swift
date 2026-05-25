@@ -385,8 +385,10 @@ struct CcSettingsView: View {
     // Build 218 S3/S4 — member 编辑 / 添加 / 删除 sheet 状态
     @State private var memberEditTarget: GroupMember? = nil
     @State private var memberAddSheetPresented: Bool = false
+    @State private var memberQuickNamingPresented: Bool = false
     @State private var memberDeleteConfirm: GroupMember? = nil
     @AppStorage(GroupMemberOverrideStore.revisionKey) private var memberOverrideRev: Int = 0
+    @AppStorage(GroupMemberColorOverrideStore.revisionKey) private var memberColorOverrideRev: Int = 0
     @AppStorage(GroupMemberAdditionsStore.revisionKey) private var memberAdditionsRev: Int = 0
     @AppStorage(GroupMemberRemovalsStore.revisionKey) private var memberRemovalsRev: Int = 0
 
@@ -404,8 +406,7 @@ struct CcSettingsView: View {
 
     private var groupConfigMembers: [GroupMember] {
         // Build 218 S4 — base = default roster − removals, 然后追加 user additions.
-        // 同 revision key 触发 SwiftUI 重算 (memberAdditionsRev / memberRemovalsRev / memberOverrideRev).
-        _ = memberOverrideRev; _ = memberAdditionsRev; _ = memberRemovalsRev
+        _ = memberOverrideRev; _ = memberColorOverrideRev; _ = memberAdditionsRev; _ = memberRemovalsRev
         let removals = GroupMemberRemovalsStore.removals()
         let baseIDs = ["amian", "opia", "di", "shu", "sonnet", "opus47_fresh", "fresh"]
         var list: [GroupMember] = baseIDs.compactMap { id in
@@ -738,6 +739,33 @@ struct CcSettingsView: View {
             // Build 215 S1 — 群聊背景行 (复用 chatBackgroundRow pattern 但绑 groupChatBackgroundPath)
             groupBackgroundRow
 
+            Button {
+                memberQuickNamingPresented = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "person.text.rectangle")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Color.ccAccent)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("一键命名")
+                            .font(.ccSerifAdaptive(size: 14, weight: .semibold))
+                            .foregroundStyle(Color.ccText)
+                        Text("仅本机显示 不上传")
+                            .font(.ccSerifAdaptive(size: 11))
+                            .foregroundStyle(Color.ccTextDim)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.ccTextDim)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .overlay(Rectangle().fill(Color.ccTextDim.opacity(0.1)).frame(height: 0.5), alignment: .bottom)
+
             ForEach(groupConfigMembers) { member in
                 groupAvatarRow(member: member)
                     .contextMenu {
@@ -771,14 +799,19 @@ struct CcSettingsView: View {
 
             toggleRow("群聊视图", binding: $featureGroupView)
         }
-        .id("group-config-\(groupAvatarRefreshTick)-\(groupBgRefreshTick)-\(memberOverrideRev)-\(memberAdditionsRev)-\(memberRemovalsRev)")
+        .id("group-config-\(groupAvatarRefreshTick)-\(groupBgRefreshTick)-\(memberOverrideRev)-\(memberColorOverrideRev)-\(memberAdditionsRev)-\(memberRemovalsRev)")
         .sheet(item: $memberEditTarget) { member in
-            GroupMemberEditSheet(member: member) { newName, clearAvatar in
+            GroupMemberEditSheet(member: member) { newName, newColor, clearAvatar in
                 let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmed.isEmpty || trimmed == member.displayName {
                     GroupMemberOverrideStore.setDisplayNameOverride(nil, for: member.id)
                 } else {
                     GroupMemberOverrideStore.setDisplayNameOverride(trimmed, for: member.id)
+                }
+                if newColor == (member.color ?? "slate") {
+                    GroupMemberColorOverrideStore.setColorOverride(nil, for: member.id)
+                } else {
+                    GroupMemberColorOverrideStore.setColorOverride(newColor, for: member.id)
                 }
                 if clearAvatar {
                     GroupAvatarStore.removeAvatar(for: member.id)
@@ -791,14 +824,43 @@ struct CcSettingsView: View {
                 groupAvatarPickerPresented = true
             } onCancel: {
                 memberEditTarget = nil
+            } onDelete: {
+                // Build 220 item 1 — Edit sheet 红删除按钮调这里, 跟 contextMenu 删除路径同款
+                GroupMemberRemovalsStore.markRemoved(member.id)
+                GroupMemberAdditionsStore.remove(id: member.id)
+                Task { await GroupMemberSyncClient.delete(id: member.id) }
+                memberEditTarget = nil
+                actionToast = "已从群里删除 \(member.title)"
+            }
+        }
+        .sheet(isPresented: $memberQuickNamingPresented) {
+            GroupMemberQuickNamingSheet(members: groupConfigMembers) { drafts in
+                for member in groupConfigMembers {
+                    let trimmed = (drafts[member.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty || trimmed == member.displayName {
+                        GroupMemberOverrideStore.setDisplayNameOverride(nil, for: member.id)
+                    } else {
+                        GroupMemberOverrideStore.setDisplayNameOverride(trimmed, for: member.id)
+                    }
+                }
+                memberQuickNamingPresented = false
+                actionToast = "本机成员名已保存"
+            } onCancel: {
+                memberQuickNamingPresented = false
             }
         }
         .sheet(isPresented: $memberAddSheetPresented) {
             GroupMemberAddSheet { newMember in
+                // Build 220 r4 item 2 — 不填 avatar 时之前出现 silent fail: sheet 关 + 成员不出现.
+                // 修法 (belt + suspenders): add() 内部 persist 已 bump revision, 这里再显式 bump 一次
+                // 防止某些情况 @AppStorage observation 还没 fire 就 sheet dismiss. dismiss 也延后一拍.
                 GroupMemberAdditionsStore.add(newMember)
+                GroupMemberAdditionsStore.bumpRevisionPublic()
                 Task { await GroupMemberSyncClient.add(newMember) }
-                memberAddSheetPresented = false
                 actionToast = "已添加 \(newMember.displayName)"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    memberAddSheetPresented = false
+                }
             } onCancel: {
                 memberAddSheetPresented = false
             }
@@ -1622,13 +1684,25 @@ struct GroupSettingsEditSheet: View {
 // MARK: - Build 218 S3 — GroupMemberEditSheet (单个 member 头像 + displayName 编辑)
 struct GroupMemberEditSheet: View {
     let member: GroupMember
-    let onSave: (String, Bool) -> Void  // (newName, clearAvatar)
+    let onSave: (String, String, Bool) -> Void
     let onPickAvatar: () -> Void
     let onCancel: () -> Void
+    let onDelete: () -> Void  // Build 220 item 1 — 显式删除入口, 不靠长按 contextMenu
 
     @Environment(\.dismiss) private var dismiss
     @State private var draftName: String = ""
+    @State private var draftColor: String = "slate"
     @State private var draftClearAvatar: Bool = false
+    @State private var showDeleteConfirm: Bool = false
+
+    private let colorOptions: [(tag: String, label: String)] = [
+        ("orange",  "暖橙"),
+        ("blue",    "雾青"),
+        ("green",   "苔绿"),
+        ("purple",  "鸢尾紫"),
+        ("slate",   "石板"),
+        ("neutral", "米白"),
+    ]
 
     var body: some View {
         NavigationStack {
@@ -1667,6 +1741,31 @@ struct GroupMemberEditSheet: View {
                         }
                     }
                 }
+                Section("颜色") {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 60), spacing: 12)], spacing: 12) {
+                        ForEach(colorOptions, id: \.tag) { opt in
+                            Button {
+                                draftColor = opt.tag
+                            } label: {
+                                VStack(spacing: 4) {
+                                    Circle()
+                                        .fill(GroupMember.swatchColor(for: opt.tag))
+                                        .frame(width: 36, height: 36)
+                                        .overlay(
+                                            Circle()
+                                                .stroke(draftColor == opt.tag ? Color.ccAccent : Color.ccTextDim.opacity(0.2),
+                                                        lineWidth: draftColor == opt.tag ? 2.5 : 0.5)
+                                        )
+                                    Text(opt.label)
+                                        .font(.ccSerifAdaptive(size: 11, weight: draftColor == opt.tag ? .semibold : .regular))
+                                        .foregroundStyle(draftColor == opt.tag ? Color.ccText : Color.ccTextDim)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
                 Section("信息") {
                     HStack { Text("ID").foregroundStyle(Color.ccTextDim); Spacer(); Text(member.id).font(.system(.body, design: .monospaced)) }
                     if let model = member.model, !model.isEmpty {
@@ -1676,8 +1775,28 @@ struct GroupMemberEditSheet: View {
                         HStack { Text("tmux session").foregroundStyle(Color.ccTextDim); Spacer(); Text(tmux).font(.system(.body, design: .monospaced)) }
                     }
                 }
+                // Build 220 item 1 — 显式删除按钮 (替代长按 contextMenu 隐藏入口)
+                Section {
+                    Button(role: .destructive) {
+                        showDeleteConfirm = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "trash")
+                            Text("删除成员")
+                                .font(.ccSerifAdaptive(size: 15, weight: .semibold))
+                        }
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    }
+                }
             }
             .navigationTitle("编辑 \(member.title)")
+            .alert("删除 \(member.title)?", isPresented: $showDeleteConfirm) {
+                Button("取消", role: .cancel) {}
+                Button("删除", role: .destructive) { onDelete() }
+            } message: {
+                Text("从群里删除 \(member.title). 删了就不在群里了 重新加成员才能恢复.")
+            }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -1688,13 +1807,54 @@ struct GroupMemberEditSheet: View {
                         if draftClearAvatar {
                             GroupAvatarStore.removeAvatar(for: member.id)
                         }
-                        onSave(draftName, draftClearAvatar)
+                        onSave(draftName, draftColor, draftClearAvatar)
                     }
                 }
             }
         }
         .onAppear {
             draftName = GroupMemberOverrideStore.displayNameOverride(for: member.id) ?? member.displayName
+            draftColor = GroupMemberColorOverrideStore.colorOverride(for: member.id) ?? member.color ?? "slate"
+        }
+    }
+}
+
+struct GroupMemberQuickNamingSheet: View {
+    let members: [GroupMember]
+    let onSave: ([String: String]) -> Void
+    let onCancel: () -> Void
+
+    @State private var drafts: [String: String] = [:]
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("仅本机显示") {
+                    ForEach(members) { member in
+                        TextField(member.displayName, text: Binding(
+                            get: { drafts[member.id] ?? (GroupMemberOverrideStore.displayNameOverride(for: member.id) ?? member.displayName) },
+                            set: { drafts[member.id] = $0 }
+                        ))
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                    }
+                }
+            }
+            .navigationTitle("一键命名")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { onCancel() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") { onSave(drafts) }
+                }
+            }
+        }
+        .onAppear {
+            for member in members {
+                drafts[member.id] = GroupMemberOverrideStore.displayNameOverride(for: member.id) ?? member.displayName
+            }
         }
     }
 }
@@ -1713,7 +1873,14 @@ struct GroupMemberAddSheet: View {
     @State private var draftColor: String = "slate"
     @State private var draftAvatar: String = ""
 
-    private let colorOptions = ["orange", "blue", "green", "purple", "slate", "neutral"]
+    private let colorOptions: [(tag: String, label: String)] = [
+        ("orange",  "暖橙"),
+        ("blue",    "雾青"),
+        ("green",   "苔绿"),
+        ("purple",  "鸢尾紫"),
+        ("slate",   "石板"),
+        ("neutral", "米白"),
+    ]
 
     var body: some View {
         NavigationStack {
@@ -1734,13 +1901,33 @@ struct GroupMemberAddSheet: View {
                     TextField("tmux session 名", text: $draftTmux)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled(true)
-                    Toggle("可回复 (canReply)", isOn: $draftCanReply)
+                    Toggle("允许回复", isOn: $draftCanReply)
                 }
                 Section("颜色") {
-                    Picker("颜色", selection: $draftColor) {
-                        ForEach(colorOptions, id: \.self) { Text($0).tag($0) }
+                    // Build 220 item 9 — 圆色块 grid, 每块下面文字标签. 走 designer-grade muted 色板.
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 60), spacing: 12)], spacing: 12) {
+                        ForEach(colorOptions, id: \.tag) { opt in
+                            Button {
+                                draftColor = opt.tag
+                            } label: {
+                                VStack(spacing: 4) {
+                                    Circle()
+                                        .fill(GroupMember.swatchColor(for: opt.tag))
+                                        .frame(width: 36, height: 36)
+                                        .overlay(
+                                            Circle()
+                                                .stroke(draftColor == opt.tag ? Color.ccAccent : Color.ccTextDim.opacity(0.2),
+                                                        lineWidth: draftColor == opt.tag ? 2.5 : 0.5)
+                                        )
+                                    Text(opt.label)
+                                        .font(.ccSerifAdaptive(size: 11, weight: draftColor == opt.tag ? .semibold : .regular))
+                                        .foregroundStyle(draftColor == opt.tag ? Color.ccText : Color.ccTextDim)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
-                    .pickerStyle(.segmented)
+                    .padding(.vertical, 6)
                 }
             }
             .navigationTitle("添加成员")

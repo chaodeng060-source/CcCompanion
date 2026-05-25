@@ -41,6 +41,16 @@
       "model": "Codex GPT-5.5",
       "tmux": "agent-c",
       "can_reply": true
+    },
+    {
+      "id": "agent_e",
+      "display_name": "Agent E",
+      "kind": "agent",
+      "avatar": "E",
+      "color": "pink",
+      "model": "Optional third-party CLI agent",
+      "tmux": "agent-e",
+      "can_reply": true
     }
   ],
   "mention_aliases": {
